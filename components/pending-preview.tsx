@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { ImageIcon, FileText } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { fileToDataUrl } from "@/lib/image-utils"
+import { renderPdfPreview } from "@/lib/pdf-utils"
 
 interface PendingPreviewProps {
   file: File
@@ -21,30 +22,9 @@ export function PendingPreview({ file, onRestore }: PendingPreviewProps) {
       setLoading(true)
       try {
         if (file.type === "application/pdf") {
-          // Preview first 1-2 pages of PDF
-          const pdfjs = await import("pdfjs-dist")
-          const buffer = await file.arrayBuffer()
-          const doc = await pdfjs.getDocument({ data: buffer }).promise
-          setPageCount(doc.numPages)
-
-          const pages: string[] = []
-          const pageLimit = Math.min(2, doc.numPages)
-
-          for (let i = 1; i <= pageLimit; i++) {
-            const page = await doc.getPage(i)
-            const viewport = page.getViewport({ scale: 1.5 })
-            const canvas = document.createElement("canvas")
-            canvas.width = viewport.width
-            canvas.height = viewport.height
-            const ctx = canvas.getContext("2d")!
-            ctx.fillStyle = "#ffffff"
-            ctx.fillRect(0, 0, canvas.width, canvas.height)
-
-            await page.render({ canvas, canvasContext: ctx, viewport }).promise
-            pages.push(canvas.toDataURL("image/png"))
-          }
-
-          setPdfPages(pages)
+          const result = await renderPdfPreview(file)
+          setPageCount(result.pageCount)
+          setPdfPages(result.pages)
         } else {
           // Show image preview
           const dataUrl = await fileToDataUrl(file)
@@ -92,7 +72,7 @@ export function PendingPreview({ file, onRestore }: PendingPreviewProps) {
             </div>
           </div>
         ) : file.type === "application/pdf" && pdfPages.length > 0 ? (
-          <div className="flex gap-4 overflow-x-auto pb-4">
+          <div className="flex justify-center gap-4 overflow-x-auto pb-4">
             {pdfPages.map((pageUrl, idx) => (
               <div
                 key={idx}

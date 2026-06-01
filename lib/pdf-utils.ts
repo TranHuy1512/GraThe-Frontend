@@ -13,13 +13,60 @@ export interface PdfPage {
 
 let workerConfigured = false
 
-async function getPdfjs() {
-  const pdfjs = await import("pdfjs-dist")
+function ensurePromiseTry() {
+  if (typeof Promise.try === "function") return
+
+  Promise.try = function promiseTry<T>(callback: () => T | PromiseLike<T>) {
+    return new Promise<T>((resolve) => resolve(callback()))
+  }
+}
+
+export async function getPdfjs() {
+  ensurePromiseTry()
+
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs")
   if (!workerConfigured) {
-    pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`
+    if (typeof window !== "undefined" && "Worker" in window) {
+      pdfjs.GlobalWorkerOptions.workerPort = new Worker(
+        new URL("pdfjs-dist/legacy/build/pdf.worker.mjs", import.meta.url),
+        { type: "module" },
+      )
+    } else {
+      pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+        "pdfjs-dist/legacy/build/pdf.worker.mjs",
+        import.meta.url,
+      ).toString()
+    }
     workerConfigured = true
   }
   return pdfjs
+}
+
+export async function renderPdfPreview(file: File, pageLimit = 2): Promise<{
+  pageCount: number
+  pages: string[]
+}> {
+  const pdfjs = await getPdfjs()
+  const buffer = await file.arrayBuffer()
+  const doc = await pdfjs.getDocument({ data: buffer }).promise
+  const pages: string[] = []
+  const limit = Math.min(pageLimit, doc.numPages)
+
+  for (let i = 1; i <= limit; i++) {
+    const page = await doc.getPage(i)
+    const viewport = page.getViewport({ scale: 1.5 })
+    const canvas = document.createElement("canvas")
+    canvas.width = viewport.width
+    canvas.height = viewport.height
+    const ctx = canvas.getContext("2d")!
+    ctx.fillStyle = "#ffffff"
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+
+    await page.render({ canvas, canvasContext: ctx, viewport }).promise
+    pages.push(canvas.toDataURL("image/png"))
+  }
+
+  return { pageCount: doc.numPages, pages }
 }
 
 // Renders every page of a PDF to images, then produces a restored variant per page.
