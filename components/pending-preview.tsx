@@ -9,9 +9,10 @@ import { renderPdfPreview } from "@/lib/pdf-utils"
 interface PendingPreviewProps {
   file: File
   onRestore: () => void
+  isChecking?: boolean
 }
 
-export function PendingPreview({ file, onRestore }: PendingPreviewProps) {
+export function PendingPreview({ file, onRestore, isChecking = false }: PendingPreviewProps) {
   const [preview, setPreview] = useState<string | null>(null)
   const [pdfPages, setPdfPages] = useState<string[]>([])
   const [pageCount, setPageCount] = useState(0)
@@ -104,8 +105,8 @@ export function PendingPreview({ file, onRestore }: PendingPreviewProps) {
 
       {/* Action Buttons */}
       <div className="flex gap-3">
-        <Button onClick={onRestore} size="lg" className="flex-1">
-          Restore document
+        <Button onClick={onRestore} disabled={isChecking} size="lg" className="flex-1">
+          {isChecking ? "Checking document…" : "Restore document"}
         </Button>
       </div>
     </div>

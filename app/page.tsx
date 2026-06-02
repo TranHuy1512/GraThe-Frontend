@@ -15,6 +15,7 @@ import { ConfirmRestoreDialog } from "@/components/confirm-restore-dialog"
 import { ProcessingView } from "@/components/processing-view"
 import { fileToDataUrl, restoreFromDataUrl, downloadDataUrl } from "@/lib/image-utils"
 import { renderPdf, buildPdf, type PdfPage } from "@/lib/pdf-utils"
+import { classifyImage, type ClassificationResult } from "@/lib/classification-api"
 
 type Status = "idle" | "pending" | "confirming" | "processing" | "done"
 type Mode = "image" | "pdf"
@@ -46,6 +47,9 @@ export default function Page() {
 
   const [pendingFile, setPendingFile] = useState<File | null>(null)
   const [showConfirm, setShowConfirm] = useState(false)
+  const [classification, setClassification] = useState<ClassificationResult | null>(null)
+  const [classificationError, setClassificationError] = useState<string | null>(null)
+  const [checkingClassification, setCheckingClassification] = useState(false)
 
   const newInputRef = useRef<HTMLInputElement>(null)
 
@@ -60,13 +64,34 @@ export default function Page() {
   const handleFile = useCallback(async (file: File) => {
     setPendingFile(file)
     setShowConfirm(false)
+    setClassification(null)
+    setClassificationError(null)
+    setCheckingClassification(false)
     setStatus("pending")
   }, [])
 
-  const handlePendingRestore = useCallback(() => {
+  const handlePendingRestore = useCallback(async () => {
+    if (!pendingFile) return
+
+    if (pendingFile.type.startsWith("image/")) {
+      setCheckingClassification(true)
+      setClassification(null)
+      setClassificationError(null)
+
+      try {
+        const result = await classifyImage(pendingFile)
+        setClassification(result)
+      } catch (err) {
+        console.log("[v0] Image classification failed:", err)
+        setClassificationError(err instanceof Error ? err.message : "Classification failed")
+      } finally {
+        setCheckingClassification(false)
+      }
+    }
+
     setShowConfirm(true)
     setStatus("confirming")
-  }, [])
+  }, [pendingFile])
 
   const handleConfirmRestore = useCallback(async () => {
     if (!pendingFile) return
@@ -275,15 +300,25 @@ export default function Page() {
           )}
 
           {status === "pending" && pendingFile && (
-            <PendingPreview file={pendingFile} onRestore={handlePendingRestore} />
+            <PendingPreview
+              file={pendingFile}
+              onRestore={handlePendingRestore}
+              isChecking={checkingClassification}
+            />
           )}
 
           {status === "confirming" && pendingFile && (
             <>
-              <PendingPreview file={pendingFile} onRestore={handlePendingRestore} />
+              <PendingPreview
+                file={pendingFile}
+                onRestore={handlePendingRestore}
+                isChecking={checkingClassification}
+              />
               <ConfirmRestoreDialog
                 open={showConfirm}
                 fileName={pendingFile.name}
+                classification={classification}
+                classificationError={classificationError}
                 onConfirm={handleConfirmRestore}
                 onCancel={handleCancelRestore}
               />
