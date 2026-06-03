@@ -13,9 +13,10 @@ import { HistorySidebar, type HistoryEntry } from "@/components/history-sidebar"
 import { PendingPreview } from "@/components/pending-preview"
 import { ConfirmRestoreDialog } from "@/components/confirm-restore-dialog"
 import { ProcessingView } from "@/components/processing-view"
-import { fileToDataUrl, restoreFromDataUrl, downloadDataUrl } from "@/lib/image-utils"
+import { fileToDataUrl, loadImage, downloadDataUrl } from "@/lib/image-utils"
 import { renderPdf, buildPdf, type PdfPage } from "@/lib/pdf-utils"
 import { classifyImage, type ClassificationResult } from "@/lib/classification-api"
+import { resolveBackendAssetUrl, restoreImage } from "@/lib/restoration-api"
 
 type Status = "idle" | "pending" | "confirming" | "processing" | "done"
 type Mode = "image" | "pdf"
@@ -39,6 +40,7 @@ export default function Page() {
   const [progress, setProgress] = useState(0)
   const [progressLabel, setProgressLabel] = useState("Analyzing document…")
   const [processingName, setProcessingName] = useState("")
+  const [processingLabel, setProcessingLabel] = useState("Restoring document…")
 
   const [history, setHistory] = useState<DocRecord[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
@@ -98,13 +100,13 @@ export default function Page() {
     setShowConfirm(false)
     setStatus("processing")
     setProcessingName(pendingFile.name)
+    setProcessingLabel("Restoring document…")
     setProgress(0)
     const id = crypto.randomUUID()
 
-    await new Promise((resolve) => setTimeout(resolve, 5000))
-
     if (pendingFile.type === "application/pdf") {
       setProgressLabel("Rendering PDF pages…")
+      setProcessingLabel("Restoring PDF pages…")
       try {
         const rendered = await renderPdf(pendingFile, (done, total) => {
           setProgress(Math.round((done / total) * 100))
@@ -136,8 +138,15 @@ export default function Page() {
     setProgressLabel("Restoring document…")
     try {
       const originalUrl = await fileToDataUrl(pendingFile)
-      setProgress(40)
-      const { restoredUrl, width, height } = await restoreFromDataUrl(originalUrl)
+      const originalImage = await loadImage(originalUrl)
+      const result = await restoreImage(pendingFile)
+      const restoredOutput = result.outputs[0]
+
+      if (!restoredOutput) {
+        throw new Error("Restoration response did not include a restored image.")
+      }
+
+      const restoredUrl = resolveBackendAssetUrl(restoredOutput.url)
       setProgress(100)
       const record: DocRecord = {
         id,
@@ -146,7 +155,12 @@ export default function Page() {
         thumbUrl: restoredUrl,
         pageCount: 1,
         createdAt: Date.now(),
-        imageDoc: { originalUrl, restoredUrl, width, height },
+        imageDoc: {
+          originalUrl,
+          restoredUrl,
+          width: originalImage.naturalWidth,
+          height: originalImage.naturalHeight,
+        },
         pages: [],
       }
       setHistory((prev) => [record, ...prev])
@@ -326,7 +340,7 @@ export default function Page() {
           )}
 
           {status === "processing" && (
-            <ProcessingView fileName={processingName} durationMs={5000} />
+            <ProcessingView fileName={processingName} label={processingLabel} />
           )}
 
           {status === "done" && active && activeRecord && (
