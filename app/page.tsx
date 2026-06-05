@@ -7,7 +7,7 @@ import { AlertCircle, Download, Pencil, FileText, ImageIcon, ScanLine } from "lu
 import { Button } from "@/components/ui/button"
 import { Uploader } from "@/components/uploader"
 import { CompareView } from "@/components/compare-view"
-import { EditDialog } from "@/components/edit-dialog"
+import { ContinueEditingDialog } from "@/components/continue-editing-dialog"
 import { HistorySidebar, type HistoryEntry } from "@/components/history-sidebar"
 import { PendingPreview } from "@/components/pending-preview"
 import { ConfirmRestoreDialog } from "@/components/confirm-restore-dialog"
@@ -28,6 +28,11 @@ interface ImageDoc {
 interface DocRecord extends HistoryEntry {
   imageDoc: ImageDoc | null
   outputPdfUrl: string | null
+  /** Keep a reference to the original File so we can call soft-restore later. */
+  originalFile: File | null
+  /** Cached soft output to avoid redundant API calls. */
+  softImageUrl: string | null
+  softContentHash: string | null
 }
 
 const ACCEPTED = "image/png,image/jpeg,image/jpg,image/webp,application/pdf"
@@ -110,6 +115,9 @@ export default function Page() {
           createdAt: new Date(result.created_at).getTime(),
           imageDoc: null,
           outputPdfUrl: result.output_pdf_url,
+          originalFile: null,
+          softImageUrl: null,
+          softContentHash: null,
         }
         setHistory((prev) => [record, ...prev])
         setActiveId(result.job_id)
@@ -149,6 +157,9 @@ export default function Page() {
           height: originalImage.naturalHeight,
         },
         outputPdfUrl: null,
+        originalFile: pendingFile,
+        softImageUrl: null,
+        softContentHash: null,
       }
       setHistory((prev) => [record, ...prev])
       setActiveId(id)
@@ -207,19 +218,58 @@ export default function Page() {
 
   const active: ImageDoc | null = activeRecord?.mode === "image" ? activeRecord.imageDoc : null
 
-  const handleEditApply = (newUrl: string) => {
-    setHistory((prev) =>
-      prev.map((rec) => {
-        if (rec.id !== activeId) return rec
-        if (rec.mode === "image") {
-          return rec.imageDoc
-            ? { ...rec, imageDoc: { ...rec.imageDoc, restoredUrl: newUrl }, thumbUrl: newUrl }
-            : rec
-        }
-        return rec
-      }),
-    )
-  }
+  /** Called when user applies a threshold from the threshold tab. */
+  const handleThresholdApply = useCallback(
+    (newUrl: string) => {
+      setHistory((prev) =>
+        prev.map((rec) => {
+          if (rec.id !== activeId) return rec
+          if (rec.mode === "image" && rec.imageDoc) {
+            return {
+              ...rec,
+              imageDoc: { ...rec.imageDoc, restoredUrl: newUrl },
+              thumbUrl: newUrl,
+            }
+          }
+          return rec
+        }),
+      )
+    },
+    [activeId],
+  )
+
+  /** Called when user applies adjustments (brightness/contrast/rotate/crop). */
+  const handleAdjustmentApply = useCallback(
+    (newUrl: string) => {
+      setHistory((prev) =>
+        prev.map((rec) => {
+          if (rec.id !== activeId) return rec
+          if (rec.mode === "image" && rec.imageDoc) {
+            return {
+              ...rec,
+              imageDoc: { ...rec.imageDoc, restoredUrl: newUrl },
+              thumbUrl: newUrl,
+            }
+          }
+          return rec
+        }),
+      )
+    },
+    [activeId],
+  )
+
+  /** Cache the soft output URL + hash for this record after first load. */
+  const handleSoftLoaded = useCallback(
+    (softUrl: string, softContentHash: string) => {
+      setHistory((prev) =>
+        prev.map((rec) => {
+          if (rec.id !== activeId) return rec
+          return { ...rec, softImageUrl: softUrl, softContentHash }
+        }),
+      )
+    },
+    [activeId],
+  )
 
   const handleDownload = () => {
     if (!active) return
@@ -365,14 +415,20 @@ export default function Page() {
         </section>
       </div>
 
-      {active && (
-        <EditDialog
+      {active && activeRecord && (
+        <ContinueEditingDialog
           open={editing}
           onOpenChange={setEditing}
           sourceUrl={active.restoredUrl}
-          onApply={handleEditApply}
+          originalFile={activeRecord.originalFile}
+          onThresholdApply={handleThresholdApply}
+          onAdjustmentApply={handleAdjustmentApply}
+          cachedSoftUrl={activeRecord.softImageUrl}
+          cachedSoftContentHash={activeRecord.softContentHash}
+          onSoftLoaded={handleSoftLoaded}
         />
       )}
     </main>
   )
 }
+

@@ -8,6 +8,8 @@ export interface RestoredFile {
   page: number
   filename: string
   url: string
+  content_hash: string
+  cached: boolean
 }
 
 export interface RestorationResponse {
@@ -16,6 +18,24 @@ export interface RestorationResponse {
   input_type: string
   total_pages: number
   outputs: RestoredFile[]
+}
+
+export interface SoftRestorationResponse {
+  request_id: string
+  input_filename: string
+  input_type: string
+  total_pages: number
+  soft_output: RestoredFile
+  recommended_threshold: number
+}
+
+export interface ConfirmThresholdResponse {
+  request_id: string
+  filename: string
+  url: string
+  content_hash: string
+  threshold: number
+  cached: boolean
 }
 
 export type PdfRestorationStatus =
@@ -64,6 +84,42 @@ export async function restoreImage(file: File): Promise<RestorationResponse> {
   return response.json()
 }
 
+export async function restoreSoftImage(file: File): Promise<SoftRestorationResponse> {
+  const formData = new FormData()
+  formData.append("file", file)
+
+  const response = await fetch(`${API_BASE_URL}${RESTORATION_ENDPOINT}/soft`, {
+    method: "POST",
+    body: formData,
+  })
+
+  if (!response.ok) {
+    throw new Error(`Soft restoration failed with status ${response.status}`)
+  }
+
+  return response.json()
+}
+
+export async function confirmThreshold(
+  softContentHash: string,
+  threshold: number,
+): Promise<ConfirmThresholdResponse> {
+  const response = await fetch(`${API_BASE_URL}${RESTORATION_ENDPOINT}/confirm-threshold`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      soft_content_hash: softContentHash,
+      threshold,
+    }),
+  })
+
+  if (!response.ok) {
+    throw new Error(`Confirm threshold failed with status ${response.status}`)
+  }
+
+  return response.json()
+}
+
 export async function restorePdf(file: File): Promise<PdfRestorationResponse> {
   const formData = new FormData()
   formData.append("file", file)
@@ -91,4 +147,23 @@ export function resolveBackendAssetUrl(url: string): string {
 
   const apiUrl = new URL(API_BASE_URL)
   return new URL(url, apiUrl.origin).toString()
+}
+
+/**
+ * Fetch the soft-restored image through the backend proxy and return a
+ * local blob: URL.  This avoids CORS issues when drawing the image onto
+ * a Canvas for real-time threshold preview (getImageData requires
+ * same-origin or CORS-enabled images).
+ */
+export async function fetchSoftImageBlobUrl(contentHash: string): Promise<string> {
+  const response = await fetch(
+    `${API_BASE_URL}${RESTORATION_ENDPOINT}/soft-image/${encodeURIComponent(contentHash)}`,
+  )
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch soft image (status ${response.status})`)
+  }
+
+  const blob = await response.blob()
+  return URL.createObjectURL(blob)
 }
