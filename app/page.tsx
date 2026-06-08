@@ -3,7 +3,16 @@
 import type React from "react"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { AlertCircle, Download, Pencil, FileText, ImageIcon, ScanLine } from "lucide-react"
+import {
+  AlertCircle,
+  Download,
+  Eye,
+  FileText,
+  ImageIcon,
+  Loader2,
+  Pencil,
+  ScanLine,
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Uploader } from "@/components/uploader"
 import { CompareView } from "@/components/compare-view"
@@ -12,17 +21,22 @@ import { HistorySidebar, type HistoryEntry } from "@/components/history-sidebar"
 import { PendingPreview } from "@/components/pending-preview"
 import { ConfirmRestoreDialog } from "@/components/confirm-restore-dialog"
 import { ProcessingView } from "@/components/processing-view"
+import { PdfPreviewView, type PdfPageRecord } from "@/components/pdf-preview-view"
 import { fileToDataUrl, loadImage, downloadDataUrl } from "@/lib/image-utils"
 import { classifyImage, type ClassificationResult } from "@/lib/classification-api"
 import {
   deleteDocument,
+  fetchCachedImageBlobUrl,
   fetchDocuments,
+  fetchPdfJobPages,
+  fetchPdfPageBlobUrl,
   resolveBackendAssetUrl,
   restoreImage,
   restorePdf,
   updateDocument,
   type DocumentRecord,
 } from "@/lib/restoration-api"
+import { buildPdfFromPages, dataUrlToFile, renderSinglePdfPage } from "@/lib/pdf-utils"
 
 type Status = "idle" | "pending" | "confirming" | "processing" | "done"
 
@@ -36,11 +50,17 @@ interface ImageDoc {
 interface DocRecord extends HistoryEntry {
   imageDoc: ImageDoc | null
   outputPdfUrl: string | null
-  /** Keep a reference to the original File so we can call soft-restore later. */
+  /** Original image File (images only) — enables "Continue editing". */
   originalFile: File | null
-  /** Cached soft output to avoid redundant API calls. */
+  /** Cached soft output for single-image threshold editing. */
   softImageUrl: string | null
   softContentHash: string | null
+  /** Original PDF File (PDFs only) — enables comparison + page editing. */
+  originalPdfFile: File | null
+  /** Per-page restored URLs received directly from the API response. */
+  pdfRestoredPages: Array<{ pageNumber: number; url: string }>
+  /** Fully-loaded per-page records (populated lazily when "Preview" is clicked). */
+  pdfPages: PdfPageRecord[] | null
 }
 
 const ACCEPTED = "image/png,image/jpeg,image/jpg,image/webp,application/pdf"
@@ -55,6 +75,12 @@ function upsertHistoryRecord(records: DocRecord[], record: DocRecord): DocRecord
       ...record,
       softImageUrl: record.softImageUrl ?? existing.softImageUrl,
       softContentHash: record.softContentHash ?? existing.softContentHash,
+      // Preserve lazily-loaded PDF pages across history upserts
+      pdfPages: record.pdfPages ?? existing.pdfPages,
+      pdfRestoredPages:
+        record.pdfRestoredPages.length > 0
+          ? record.pdfRestoredPages
+          : existing.pdfRestoredPages,
     },
     ...records.filter((item) => item.id !== record.id),
   ]
@@ -76,7 +102,29 @@ export default function Page() {
   const [checkingClassification, setCheckingClassification] = useState(false)
   const [restorationError, setRestorationError] = useState<string | null>(null)
 
+  // ── PDF preview state ──────────────────────────────────────────────────
+  const [pdfPreviewOpen, setPdfPreviewOpen] = useState(false)
+  const [loadingPdfPreview, setLoadingPdfPreview] = useState(false)
+  const [buildingPdf, setBuildingPdf] = useState(false)
+  /**
+   * When the user clicks "Continue editing" for a specific PDF page we
+   * render that page from the original PDF file, wrap it in a File, and
+   * store it here so the ContinueEditingDialog can call soft-restore.
+   */
+  const [editingPdfPage, setEditingPdfPage] = useState<{
+    pageNumber: number
+    pageFile: File
+    sourceUrl: string
+  } | null>(null)
+  const [preparingPdfPageEdit, setPreparingPdfPageEdit] = useState(false)
+
   const newInputRef = useRef<HTMLInputElement>(null)
+
+  // Reset PDF-specific UI state when the active history item changes
+  useEffect(() => {
+    setPdfPreviewOpen(false)
+    setEditingPdfPage(null)
+  }, [activeId])
 
   // Load persisted document history from the backend on first render
   useEffect(() => {
@@ -102,6 +150,9 @@ export default function Page() {
           originalFile: null,
           softImageUrl: doc.soft_image_url ?? null,
           softContentHash: doc.soft_content_hash ?? null,
+          originalPdfFile: null,
+          pdfRestoredPages: [],
+          pdfPages: null,
         }))
         if (records.length > 0) {
           setHistory(records)
@@ -178,6 +229,11 @@ export default function Page() {
           originalFile: null,
           softImageUrl: null,
           softContentHash: null,
+          originalPdfFile: pendingFile,
+          pdfRestoredPages: result.pages
+            .filter((p) => p.public_url)
+            .map((p) => ({ pageNumber: p.page, url: p.public_url! })),
+          pdfPages: null,
         }
         setHistory((prev) => upsertHistoryRecord(prev, record))
         setActiveId(result.job_id)
@@ -220,6 +276,9 @@ export default function Page() {
         originalFile: pendingFile,
         softImageUrl: null,
         softContentHash: null,
+        originalPdfFile: null,
+        pdfRestoredPages: [],
+        pdfPages: null,
       }
       setHistory((prev) => upsertHistoryRecord(prev, record))
       setActiveId(id)
@@ -280,32 +339,26 @@ export default function Page() {
     [activeId],
   )
 
+  // ── Single-image editing callbacks ────────────────────────────────────
+
   const active: ImageDoc | null = activeRecord?.mode === "image" ? activeRecord.imageDoc : null
   const canContinueEditing = Boolean(activeRecord?.originalFile)
 
   useEffect(() => {
-    if (!canContinueEditing) {
-      setEditing(false)
-    }
+    if (!canContinueEditing) setEditing(false)
   }, [canContinueEditing])
 
-  /** Called when user applies a threshold from the threshold tab. */
   const handleThresholdApply = useCallback(
-    (newUrl: string) => {
+    (newUrl: string, _contentHash: string) => {
       setHistory((prev) =>
         prev.map((rec) => {
           if (rec.id !== activeId) return rec
           if (rec.mode === "image" && rec.imageDoc) {
-            return {
-              ...rec,
-              imageDoc: { ...rec.imageDoc, restoredUrl: newUrl },
-              thumbUrl: newUrl,
-            }
+            return { ...rec, imageDoc: { ...rec.imageDoc, restoredUrl: newUrl }, thumbUrl: newUrl }
           }
           return rec
         }),
       )
-      // Persist the new restored URL (R2 URL from confirm-threshold) to DB
       if (activeId) {
         updateDocument(activeId, { restored_url: newUrl }).catch((err) => {
           console.log("[v0] Failed to update document after threshold apply:", err)
@@ -315,18 +368,13 @@ export default function Page() {
     [activeId],
   )
 
-  /** Called when user applies adjustments (brightness/contrast/rotate/crop). */
   const handleAdjustmentApply = useCallback(
     (newUrl: string) => {
       setHistory((prev) =>
         prev.map((rec) => {
           if (rec.id !== activeId) return rec
           if (rec.mode === "image" && rec.imageDoc) {
-            return {
-              ...rec,
-              imageDoc: { ...rec.imageDoc, restoredUrl: newUrl },
-              thumbUrl: newUrl,
-            }
+            return { ...rec, imageDoc: { ...rec.imageDoc, restoredUrl: newUrl }, thumbUrl: newUrl }
           }
           return rec
         }),
@@ -335,23 +383,300 @@ export default function Page() {
     [activeId],
   )
 
-  /** Cache the soft output URL + hash for this record after first load. */
   const handleSoftLoaded = useCallback(
     (softUrl: string, softContentHash: string) => {
       setHistory((prev) =>
+        prev.map((rec) =>
+          rec.id !== activeId ? rec : { ...rec, softImageUrl: softUrl, softContentHash },
+        ),
+      )
+    },
+    [activeId],
+  )
+
+  const handleDownloadImage = () => {
+    if (!active) return
+    downloadDataUrl(active.restoredUrl, `${baseName}-restored.png`)
+  }
+
+  // ── PDF preview & download ────────────────────────────────────────────
+
+  const handlePdfPreview = useCallback(async () => {
+    if (!activeRecord || activeRecord.mode !== "pdf") return
+
+    // Already loaded — just toggle open
+    if (activeRecord.pdfPages) {
+      setPdfPreviewOpen((prev) => !prev)
+      return
+    }
+
+    setLoadingPdfPreview(true)
+    try {
+      let restoredPages = activeRecord.pdfRestoredPages
+
+      // For records loaded from DB (no in-memory pages), fetch from the backend
+      if (restoredPages.length === 0) {
+        const dbPages = await fetchPdfJobPages(activeRecord.id)
+        restoredPages = dbPages
+          .filter((p) => p.public_url)
+          .map((p) => ({ pageNumber: p.page, url: p.public_url! }))
+      }
+
+      if (restoredPages.length === 0) {
+        console.warn("[pdf-preview] No page URLs available for job", activeRecord.id)
+        setLoadingPdfPreview(false)
+        return
+      }
+
+      // Build PdfPageRecord for each page in parallel
+      const pdfPages: PdfPageRecord[] = await Promise.all(
+        restoredPages.map(async (restoredPage) => {
+          // Fetch restored page via backend proxy → blob URL (avoids CORS for jsPDF)
+          const restoredBlobUrl = await fetchPdfPageBlobUrl(
+            activeRecord.id,
+            restoredPage.pageNumber,
+          )
+
+          let originalUrl = ""
+          let width = 0
+          let height = 0
+
+          if (activeRecord.originalPdfFile) {
+            // Render original page from the in-memory PDF file
+            const rendered = await renderSinglePdfPage(
+              activeRecord.originalPdfFile,
+              restoredPage.pageNumber,
+            )
+            originalUrl = rendered.dataUrl
+            width = rendered.width
+            height = rendered.height
+          } else {
+            // Infer dimensions from the already-fetched restored blob
+            await new Promise<void>((resolve) => {
+              const img = new Image()
+              img.onload = () => {
+                width = img.naturalWidth
+                height = img.naturalHeight
+                resolve()
+              }
+              img.onerror = () => resolve()
+              img.src = restoredBlobUrl
+            })
+          }
+
+          return {
+            pageNumber: restoredPage.pageNumber,
+            originalUrl,
+            restoredUrl: restoredBlobUrl,
+            width,
+            height,
+            softImageUrl: null,
+            softContentHash: null,
+            deleted: false,
+            modified: false,
+          } satisfies PdfPageRecord
+        }),
+      )
+
+      // Ensure pages are in order
+      pdfPages.sort((a, b) => a.pageNumber - b.pageNumber)
+
+      setHistory((prev) =>
+        prev.map((rec) => (rec.id === activeId ? { ...rec, pdfPages } : rec)),
+      )
+      setPdfPreviewOpen(true)
+    } catch (err) {
+      console.error("[pdf-preview] Failed to load pages:", err)
+    } finally {
+      setLoadingPdfPreview(false)
+    }
+  }, [activeRecord, activeId])
+
+  const handleDeletePdfPage = useCallback(
+    (pageNumber: number) => {
+      setHistory((prev) =>
         prev.map((rec) => {
-          if (rec.id !== activeId) return rec
-          return { ...rec, softImageUrl: softUrl, softContentHash }
+          if (rec.id !== activeId || !rec.pdfPages) return rec
+          return {
+            ...rec,
+            pdfPages: rec.pdfPages.map((p) =>
+              p.pageNumber === pageNumber ? { ...p, deleted: true } : p,
+            ),
+          }
         }),
       )
     },
     [activeId],
   )
 
-  const handleDownload = () => {
-    if (!active) return
-    downloadDataUrl(active.restoredUrl, `${baseName}-restored.png`)
-  }
+  const handleRestorePdfPage = useCallback(
+    (pageNumber: number) => {
+      setHistory((prev) =>
+        prev.map((rec) => {
+          if (rec.id !== activeId || !rec.pdfPages) return rec
+          return {
+            ...rec,
+            pdfPages: rec.pdfPages.map((p) =>
+              p.pageNumber === pageNumber ? { ...p, deleted: false } : p,
+            ),
+          }
+        }),
+      )
+    },
+    [activeId],
+  )
+
+  /**
+   * Render a single page from the original PDF file as a File blob,
+   * then open the ContinueEditingDialog for that page.
+   */
+  const handleEditPdfPage = useCallback(
+    async (pageNumber: number) => {
+      if (!activeRecord?.originalPdfFile || !activeRecord.pdfPages) return
+      const page = activeRecord.pdfPages.find((p) => p.pageNumber === pageNumber)
+      if (!page) return
+
+      setPreparingPdfPageEdit(true)
+      try {
+        const { dataUrl } = await renderSinglePdfPage(
+          activeRecord.originalPdfFile,
+          pageNumber,
+        )
+        const pageFile = dataUrlToFile(dataUrl, `page-${pageNumber}.png`)
+        setEditingPdfPage({
+          pageNumber,
+          pageFile,
+          sourceUrl: page.restoredUrl,
+        })
+      } catch (err) {
+        console.error("[pdf-edit] Failed to render page for editing:", err)
+      } finally {
+        setPreparingPdfPageEdit(false)
+      }
+    },
+    [activeRecord],
+  )
+
+  /**
+   * Called when threshold is applied to a PDF page.
+   * The content_hash lets us proxy-fetch a blob URL suitable for jsPDF.
+   */
+  const handlePdfPageThresholdApply = useCallback(
+    async (newUrl: string, contentHash: string) => {
+      if (!editingPdfPage || !activeId) return
+      const { pageNumber } = editingPdfPage
+
+      // Exchange the R2 URL for a same-origin blob URL so jsPDF can embed it
+      let blobUrl = newUrl
+      try {
+        blobUrl = await fetchCachedImageBlobUrl(contentHash)
+      } catch {
+        // Fall back to the R2 URL — display still works, only PDF rebuild may fail
+      }
+
+      setHistory((prev) =>
+        prev.map((rec) => {
+          if (rec.id !== activeId || !rec.pdfPages) return rec
+          return {
+            ...rec,
+            pdfPages: rec.pdfPages.map((p) =>
+              p.pageNumber === pageNumber
+                ? { ...p, restoredUrl: blobUrl, modified: true }
+                : p,
+            ),
+          }
+        }),
+      )
+      setEditingPdfPage(null)
+    },
+    [editingPdfPage, activeId],
+  )
+
+  /** Called when adjustments (brightness/contrast/rotate/crop) are applied to a PDF page. */
+  const handlePdfPageAdjustmentApply = useCallback(
+    (newUrl: string) => {
+      if (!editingPdfPage || !activeId) return
+      const { pageNumber } = editingPdfPage
+
+      // newUrl is a canvas data URL — safe for jsPDF directly
+      setHistory((prev) =>
+        prev.map((rec) => {
+          if (rec.id !== activeId || !rec.pdfPages) return rec
+          return {
+            ...rec,
+            pdfPages: rec.pdfPages.map((p) =>
+              p.pageNumber === pageNumber
+                ? { ...p, restoredUrl: newUrl, modified: true }
+                : p,
+            ),
+          }
+        }),
+      )
+      setEditingPdfPage(null)
+    },
+    [editingPdfPage, activeId],
+  )
+
+  /** Cache the soft URL for a PDF page after first load. */
+  const handlePdfPageSoftLoaded = useCallback(
+    (softUrl: string, softContentHash: string) => {
+      if (!editingPdfPage || !activeId) return
+      const { pageNumber } = editingPdfPage
+      setHistory((prev) =>
+        prev.map((rec) => {
+          if (rec.id !== activeId || !rec.pdfPages) return rec
+          return {
+            ...rec,
+            pdfPages: rec.pdfPages.map((p) =>
+              p.pageNumber === pageNumber
+                ? { ...p, softImageUrl: softUrl, softContentHash }
+                : p,
+            ),
+          }
+        }),
+      )
+    },
+    [editingPdfPage, activeId],
+  )
+
+  const handleDownloadPdf = useCallback(async () => {
+    if (!activeRecord || activeRecord.mode !== "pdf") return
+    const outputFilename = `${baseName}-restored.pdf`
+
+    const pdfPages = activeRecord.pdfPages
+    const needsRebuild = pdfPages && pdfPages.some((p) => p.deleted || p.modified)
+
+    if (!needsRebuild) {
+      // No modifications — serve the backend-merged PDF directly
+      if (activeRecord.outputPdfUrl) {
+        downloadDataUrl(activeRecord.outputPdfUrl, outputFilename)
+      }
+      return
+    }
+
+    // Rebuild PDF from individual page blobs
+    setBuildingPdf(true)
+    try {
+      await buildPdfFromPages(pdfPages!, outputFilename)
+    } catch (err) {
+      console.error("[pdf-download] Failed to build PDF:", err)
+    } finally {
+      setBuildingPdf(false)
+    }
+  }, [activeRecord, baseName])
+
+  // ── Derived values ────────────────────────────────────────────────────
+
+  const activePdfRecord =
+    activeRecord?.mode === "pdf" ? activeRecord : null
+
+  const activePdfPages = activePdfRecord?.pdfPages ?? null
+
+  const editingPdfPageRecord = editingPdfPage
+    ? activePdfPages?.find((p) => p.pageNumber === editingPdfPage.pageNumber) ?? null
+    : null
+
+  // ── Render ────────────────────────────────────────────────────────────
 
   return (
     <main className="min-h-screen bg-background">
@@ -404,8 +729,8 @@ export default function Page() {
                   Restore your scanned documents
                 </h2>
                 <p className="mx-auto mt-2 max-w-lg text-pretty text-sm leading-relaxed text-muted-foreground">
-                  Clean up faded scans and aged paper. Upload an image or PDF, compare the result against the original,
-                  and download a polished copy.
+                  Clean up faded scans and aged paper. Upload an image or PDF, compare the result
+                  against the original, and download a polished copy.
                 </p>
               </div>
               <Uploader onFile={handleFile} />
@@ -442,24 +767,84 @@ export default function Page() {
             <ProcessingView fileName={processingName} label={processingLabel} />
           )}
 
-          {status === "done" && activeRecord?.mode === "pdf" && activeRecord.outputPdfUrl && (
-            <div className="mx-auto flex max-w-xl flex-col items-center rounded-xl border border-border bg-card px-6 py-16 text-center">
-              <div className="mb-5 flex size-14 items-center justify-center rounded-full bg-primary/10 text-primary">
-                <FileText className="size-7" />
+          {/* ── PDF done state ── */}
+          {status === "done" && activePdfRecord && (
+            <div className="flex flex-col gap-6">
+              {/* Summary card */}
+              <div className="flex flex-col gap-4 rounded-xl border border-border bg-card p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-center gap-3 overflow-hidden">
+                  <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-secondary text-muted-foreground">
+                    <FileText className="size-5" />
+                  </div>
+                  <div className="overflow-hidden">
+                    <p className="truncate text-sm font-medium text-foreground">
+                      {activePdfRecord.fileName}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {activePdfRecord.pageCount} page{activePdfRecord.pageCount !== 1 ? "s" : ""} · Restored
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex shrink-0 gap-2">
+                  {/* Preview button */}
+                  <Button
+                    variant="outline"
+                    onClick={handlePdfPreview}
+                    disabled={loadingPdfPreview}
+                  >
+                    {loadingPdfPreview ? (
+                      <>
+                        <Loader2 className="size-4 animate-spin" />
+                        Loading…
+                      </>
+                    ) : (
+                      <>
+                        <Eye className="size-4" />
+                        {pdfPreviewOpen ? "Close preview" : "Preview pages"}
+                      </>
+                    )}
+                  </Button>
+
+                  {/* Download button */}
+                  <Button onClick={handleDownloadPdf} disabled={buildingPdf}>
+                    {buildingPdf ? (
+                      <>
+                        <Loader2 className="size-4 animate-spin" />
+                        Building PDF…
+                      </>
+                    ) : (
+                      <>
+                        <Download className="size-4" />
+                        Download PDF
+                      </>
+                    )}
+                  </Button>
+                </div>
               </div>
-              <h2 className="text-xl font-semibold text-foreground">Your restored PDF is ready</h2>
-              <p className="mb-6 mt-2 max-w-md truncate text-sm text-muted-foreground">
-                {activeRecord.fileName} · {activeRecord.pageCount} page{activeRecord.pageCount !== 1 ? "s" : ""}
-              </p>
-              <Button asChild size="lg">
-                <a href={activeRecord.outputPdfUrl} download={`${baseName}-restored.pdf`}>
-                  <Download className="size-4" />
-                  Download restored PDF
-                </a>
-              </Button>
+
+              {/* Page-by-page preview */}
+              {pdfPreviewOpen && activePdfPages && (
+                <PdfPreviewView
+                  pages={activePdfPages}
+                  canEdit={Boolean(activePdfRecord.originalPdfFile) && !preparingPdfPageEdit}
+                  onDeletePage={handleDeletePdfPage}
+                  onRestorePage={handleRestorePdfPage}
+                  onEditPage={handleEditPdfPage}
+                />
+              )}
+
+              {/* Preparing page for editing spinner */}
+              {preparingPdfPageEdit && (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="size-4 animate-spin" />
+                  Preparing page for editing…
+                </div>
+              )}
             </div>
           )}
 
+          {/* ── Single-image done state ── */}
           {status === "done" && active && activeRecord?.mode === "image" && (
             <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_260px]">
               <div className="order-2 flex min-w-0 flex-col gap-6 xl:order-1">
@@ -469,20 +854,22 @@ export default function Page() {
                       <ImageIcon className="size-5" />
                     </div>
                     <div className="overflow-hidden">
-                      <p className="truncate text-sm font-medium text-foreground">{activeRecord.fileName}</p>
+                      <p className="truncate text-sm font-medium text-foreground">
+                        {activeRecord.fileName}
+                      </p>
                       <p className="text-xs text-muted-foreground">Restored</p>
                     </div>
                   </div>
-	                  <div className="flex shrink-0 gap-2">
-	                    {canContinueEditing && (
-	                      <Button variant="outline" onClick={() => setEditing(true)}>
-	                        <Pencil className="size-4" />
-	                        Continue editing
-	                      </Button>
-	                    )}
-	                    <Button onClick={handleDownload}>
-	                      <Download className="size-4" />
-	                      Download image
+                  <div className="flex shrink-0 gap-2">
+                    {canContinueEditing && (
+                      <Button variant="outline" onClick={() => setEditing(true)}>
+                        <Pencil className="size-4" />
+                        Continue editing
+                      </Button>
+                    )}
+                    <Button onClick={handleDownloadImage}>
+                      <Download className="size-4" />
+                      Download image
                     </Button>
                   </div>
                 </div>
@@ -494,6 +881,7 @@ export default function Page() {
         </section>
       </div>
 
+      {/* ── Single-image ContinueEditingDialog ── */}
       {active && activeRecord && canContinueEditing && (
         <ContinueEditingDialog
           open={editing}
@@ -505,6 +893,23 @@ export default function Page() {
           cachedSoftUrl={activeRecord.softImageUrl}
           cachedSoftContentHash={activeRecord.softContentHash}
           onSoftLoaded={handleSoftLoaded}
+        />
+      )}
+
+      {/* ── PDF-page ContinueEditingDialog ── */}
+      {editingPdfPage && (
+        <ContinueEditingDialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setEditingPdfPage(null)
+          }}
+          sourceUrl={editingPdfPage.sourceUrl}
+          originalFile={editingPdfPage.pageFile}
+          onThresholdApply={handlePdfPageThresholdApply}
+          onAdjustmentApply={handlePdfPageAdjustmentApply}
+          cachedSoftUrl={editingPdfPageRecord?.softImageUrl ?? null}
+          cachedSoftContentHash={editingPdfPageRecord?.softContentHash ?? null}
+          onSoftLoaded={handlePdfPageSoftLoaded}
         />
       )}
     </main>

@@ -210,6 +210,66 @@ export async function fetchSoftImageBlobUrl(contentHash: string): Promise<string
   return URL.createObjectURL(blob)
 }
 
+/**
+ * Fetch a binarized cached image through the backend proxy and return a
+ * local blob: URL.  Used after confirm-threshold to get a CORS-safe URL
+ * for PDF page rebuilding with jsPDF.
+ */
+export async function fetchCachedImageBlobUrl(contentHash: string): Promise<string> {
+  const response = await fetch(
+    `${API_BASE_URL}${RESTORATION_ENDPOINT}/cached-image/${encodeURIComponent(contentHash)}`,
+  )
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch cached image (status ${response.status})`)
+  }
+
+  const blob = await response.blob()
+  return URL.createObjectURL(blob)
+}
+
+/**
+ * Fetch a specific restored page image from a PDF job through the backend
+ * proxy and return a local blob: URL.
+ */
+export async function fetchPdfPageBlobUrl(jobId: string, pageNum: number): Promise<string> {
+  const response = await fetch(
+    `${API_BASE_URL}${PDF_RESTORATION_ENDPOINT}/${encodeURIComponent(jobId)}/page-image/${pageNum}`,
+  )
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch PDF page image (status ${response.status})`)
+  }
+
+  const blob = await response.blob()
+  return URL.createObjectURL(blob)
+}
+
+export interface PdfJobPageRecord {
+  page: number
+  filename: string
+  r2_object_key: string
+  public_url: string | null
+  content_hash: string
+  cached: number
+}
+
+/**
+ * Fetch all per-page records for a PDF job from the persistent database.
+ * Works even after server restarts (unlike the in-memory job status endpoint).
+ */
+export async function fetchPdfJobPages(jobId: string): Promise<PdfJobPageRecord[]> {
+  const response = await fetch(
+    `${API_BASE_URL}${PDF_RESTORATION_ENDPOINT}/${encodeURIComponent(jobId)}/pages`,
+  )
+
+  if (!response.ok) {
+    return []
+  }
+
+  return response.json()
+}
+
 // ------------------------------------------------------------------ //
 //  Document library API                                               //
 // ------------------------------------------------------------------ //

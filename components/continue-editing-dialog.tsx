@@ -44,8 +44,12 @@ interface ContinueEditingDialogProps {
   sourceUrl: string
   /** The original File object so we can call soft-restore. */
   originalFile: File | null
-  /** Called when the user applies threshold – receives the new R2 URL. */
-  onThresholdApply: (newUrl: string) => void
+  /**
+   * Called when the user applies threshold.
+   * Receives the new R2 URL and the content hash of the confirmed image.
+   * The hash can be used to proxy-fetch a blob URL for canvas/jsPDF operations.
+   */
+  onThresholdApply: (newUrl: string, contentHash: string) => void
   /** Called when the user applies adjustments – receives the new data URL. */
   onAdjustmentApply: (newUrl: string) => void
   /** Cached soft output to avoid redundant API calls. */
@@ -111,8 +115,8 @@ export function ContinueEditingDialog({
               cachedSoftUrl={cachedSoftUrl}
               cachedSoftContentHash={cachedSoftContentHash}
               onSoftLoaded={onSoftLoaded}
-              onApply={(url) => {
-                onThresholdApply(url)
+              onApply={(url, contentHash) => {
+                onThresholdApply(url, contentHash)
                 onOpenChange(false)
               }}
               onCancel={() => onOpenChange(false)}
@@ -153,7 +157,7 @@ function ThresholdTab({
   cachedSoftUrl?: string | null
   cachedSoftContentHash?: string | null
   onSoftLoaded?: (softUrl: string, softContentHash: string) => void
-  onApply: (url: string) => void
+  onApply: (url: string, contentHash: string) => void
   onCancel: () => void
 }) {
   const [loading, setLoading] = useState(false)
@@ -294,7 +298,7 @@ function ThresholdTab({
     try {
       const result = await confirmThreshold(softContentHash, threshold)
       const finalUrl = resolveBackendAssetUrl(result.url)
-      onApply(finalUrl)
+      onApply(finalUrl, result.content_hash)
     } catch (err) {
       console.error("[ThresholdTab] confirm failed:", err)
       setError(err instanceof Error ? err.message : "Failed to apply threshold")
