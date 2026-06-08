@@ -45,6 +45,21 @@ interface DocRecord extends HistoryEntry {
 
 const ACCEPTED = "image/png,image/jpeg,image/jpg,image/webp,application/pdf"
 
+function upsertHistoryRecord(records: DocRecord[], record: DocRecord): DocRecord[] {
+  const existing = records.find((item) => item.id === record.id)
+  if (!existing) return [record, ...records]
+
+  return [
+    {
+      ...existing,
+      ...record,
+      softImageUrl: record.softImageUrl ?? existing.softImageUrl,
+      softContentHash: record.softContentHash ?? existing.softContentHash,
+    },
+    ...records.filter((item) => item.id !== record.id),
+  ]
+}
+
 export default function Page() {
   const [status, setStatus] = useState<Status>("idle")
   const [processingName, setProcessingName] = useState("")
@@ -164,7 +179,7 @@ export default function Page() {
           softImageUrl: null,
           softContentHash: null,
         }
-        setHistory((prev) => [record, ...prev])
+        setHistory((prev) => upsertHistoryRecord(prev, record))
         setActiveId(result.job_id)
         setStatus("done")
         setPendingFile(null)
@@ -206,7 +221,7 @@ export default function Page() {
         softImageUrl: null,
         softContentHash: null,
       }
-      setHistory((prev) => [record, ...prev])
+      setHistory((prev) => upsertHistoryRecord(prev, record))
       setActiveId(id)
       setStatus("done")
       setPendingFile(null)
@@ -485,4 +500,3 @@ export default function Page() {
     </main>
   )
 }
-
