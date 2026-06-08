@@ -254,6 +254,7 @@ export default function Page() {
 
   const handleSelectHistory = useCallback((id: string) => {
     setActiveId(id)
+    setEditing(false)
     setStatus("done")
   }, [])
 
@@ -280,6 +281,13 @@ export default function Page() {
   )
 
   const active: ImageDoc | null = activeRecord?.mode === "image" ? activeRecord.imageDoc : null
+  const canContinueEditing = Boolean(activeRecord?.originalFile)
+
+  useEffect(() => {
+    if (!canContinueEditing) {
+      setEditing(false)
+    }
+  }, [canContinueEditing])
 
   /** Called when user applies a threshold from the threshold tab. */
   const handleThresholdApply = useCallback(
@@ -465,14 +473,16 @@ export default function Page() {
                       <p className="text-xs text-muted-foreground">Restored</p>
                     </div>
                   </div>
-                  <div className="flex shrink-0 gap-2">
-                    <Button variant="outline" onClick={() => setEditing(true)}>
-                      <Pencil className="size-4" />
-                      Continue editing
-                    </Button>
-                    <Button onClick={handleDownload}>
-                      <Download className="size-4" />
-                      Download image
+	                  <div className="flex shrink-0 gap-2">
+	                    {canContinueEditing && (
+	                      <Button variant="outline" onClick={() => setEditing(true)}>
+	                        <Pencil className="size-4" />
+	                        Continue editing
+	                      </Button>
+	                    )}
+	                    <Button onClick={handleDownload}>
+	                      <Download className="size-4" />
+	                      Download image
                     </Button>
                   </div>
                 </div>
@@ -484,7 +494,7 @@ export default function Page() {
         </section>
       </div>
 
-      {active && activeRecord && (
+      {active && activeRecord && canContinueEditing && (
         <ContinueEditingDialog
           open={editing}
           onOpenChange={setEditing}
