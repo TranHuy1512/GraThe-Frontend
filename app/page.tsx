@@ -2,7 +2,7 @@
 
 import type React from "react"
 
-import { useCallback, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { AlertCircle, Download, Pencil, FileText, ImageIcon, ScanLine } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Uploader } from "@/components/uploader"
@@ -14,7 +14,15 @@ import { ConfirmRestoreDialog } from "@/components/confirm-restore-dialog"
 import { ProcessingView } from "@/components/processing-view"
 import { fileToDataUrl, loadImage, downloadDataUrl } from "@/lib/image-utils"
 import { classifyImage, type ClassificationResult } from "@/lib/classification-api"
-import { resolveBackendAssetUrl, restoreImage, restorePdf } from "@/lib/restoration-api"
+import {
+  deleteDocument,
+  fetchDocuments,
+  resolveBackendAssetUrl,
+  restoreImage,
+  restorePdf,
+  updateDocument,
+  type DocumentRecord,
+} from "@/lib/restoration-api"
 
 type Status = "idle" | "pending" | "confirming" | "processing" | "done"
 
@@ -54,6 +62,43 @@ export default function Page() {
   const [restorationError, setRestorationError] = useState<string | null>(null)
 
   const newInputRef = useRef<HTMLInputElement>(null)
+
+  // Load persisted document history from the backend on first render
+  useEffect(() => {
+    fetchDocuments()
+      .then(({ items }) => {
+        const records: DocRecord[] = items.map((doc: DocumentRecord) => ({
+          id: doc.id,
+          mode: doc.mode,
+          fileName: doc.file_name,
+          thumbUrl: doc.restored_url ?? doc.output_pdf_url ?? "",
+          pageCount: doc.page_count,
+          createdAt: new Date(doc.created_at).getTime(),
+          imageDoc:
+            doc.mode === "image" && doc.original_url && doc.restored_url
+              ? {
+                  originalUrl: doc.original_url,
+                  restoredUrl: doc.restored_url,
+                  width: doc.width ?? 0,
+                  height: doc.height ?? 0,
+                }
+              : null,
+          outputPdfUrl: doc.output_pdf_url ?? null,
+          originalFile: null,
+          softImageUrl: doc.soft_image_url ?? null,
+          softContentHash: doc.soft_content_hash ?? null,
+        }))
+        if (records.length > 0) {
+          setHistory(records)
+          setActiveId(records[0].id)
+          setStatus("done")
+        }
+      })
+      .catch((err) => {
+        console.log("[v0] Failed to load documents:", err)
+      })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const activeRecord = useMemo(
     () => history.find((h) => h.id === activeId) ?? null,
@@ -131,7 +176,6 @@ export default function Page() {
       return
     }
 
-    const id = crypto.randomUUID()
     try {
       const originalUrl = await fileToDataUrl(pendingFile)
       const originalImage = await loadImage(originalUrl)
@@ -142,6 +186,7 @@ export default function Page() {
         throw new Error("Restoration response did not include a restored image.")
       }
 
+      const id = result.document_id ?? crypto.randomUUID()
       const restoredUrl = resolveBackendAssetUrl(restoredOutput.url)
       const record: DocRecord = {
         id,
@@ -212,6 +257,9 @@ export default function Page() {
         }
         return next
       })
+      deleteDocument(id).catch((err) => {
+        console.log("[v0] Failed to delete document from DB:", err)
+      })
     },
     [activeId],
   )
@@ -234,6 +282,12 @@ export default function Page() {
           return rec
         }),
       )
+      // Persist the new restored URL (R2 URL from confirm-threshold) to DB
+      if (activeId) {
+        updateDocument(activeId, { restored_url: newUrl }).catch((err) => {
+          console.log("[v0] Failed to update document after threshold apply:", err)
+        })
+      }
     },
     [activeId],
   )

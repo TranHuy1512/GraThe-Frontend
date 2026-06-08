@@ -3,6 +3,7 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000/api/v1"
 const RESTORATION_ENDPOINT = "/restorations"
 const PDF_RESTORATION_ENDPOINT = "/pdf-restorations"
+const DOCUMENTS_ENDPOINT = "/documents"
 
 export interface RestoredFile {
   page: number
@@ -18,6 +19,7 @@ export interface RestorationResponse {
   input_type: string
   total_pages: number
   outputs: RestoredFile[]
+  document_id: string | null
 }
 
 export interface SoftRestorationResponse {
@@ -36,6 +38,7 @@ export interface ConfirmThresholdResponse {
   content_hash: string
   threshold: number
   cached: boolean
+  document_id: string | null
 }
 
 export type PdfRestorationStatus =
@@ -56,6 +59,7 @@ export interface PdfRestoredPage {
 
 export interface PdfRestorationResponse {
   job_id: string
+  document_id: string | null
   status: PdfRestorationStatus
   input_filename: string
   total_pages: number | null
@@ -66,6 +70,42 @@ export interface PdfRestorationResponse {
   created_at: string
   updated_at: string
   progress_percent: number
+}
+
+export interface DocumentRecord {
+  id: string
+  mode: "image" | "pdf"
+  file_name: string
+  file_size: number | null
+  page_count: number
+  original_url: string | null
+  restored_url: string | null
+  content_hash: string | null
+  width: number | null
+  height: number | null
+  soft_content_hash: string | null
+  soft_image_url: string | null
+  output_pdf_url: string | null
+  patch_size: number | null
+  threshold: number | null
+  binarize_output: boolean | null
+  overlap: boolean | null
+  created_at: string
+  updated_at: string
+}
+
+export interface DocumentListResponse {
+  items: DocumentRecord[]
+  total: number
+}
+
+export interface DocumentUpdatePayload {
+  restored_url?: string
+  content_hash?: string
+  threshold?: number
+  soft_content_hash?: string
+  soft_image_url?: string
+  output_pdf_url?: string
 }
 
 export async function restoreImage(file: File): Promise<RestorationResponse> {
@@ -103,6 +143,7 @@ export async function restoreSoftImage(file: File): Promise<SoftRestorationRespo
 export async function confirmThreshold(
   softContentHash: string,
   threshold: number,
+  documentId?: string | null,
 ): Promise<ConfirmThresholdResponse> {
   const response = await fetch(`${API_BASE_URL}${RESTORATION_ENDPOINT}/confirm-threshold`, {
     method: "POST",
@@ -110,6 +151,7 @@ export async function confirmThreshold(
     body: JSON.stringify({
       soft_content_hash: softContentHash,
       threshold,
+      document_id: documentId ?? null,
     }),
   })
 
@@ -166,4 +208,44 @@ export async function fetchSoftImageBlobUrl(contentHash: string): Promise<string
 
   const blob = await response.blob()
   return URL.createObjectURL(blob)
+}
+
+// ------------------------------------------------------------------ //
+//  Document library API                                               //
+// ------------------------------------------------------------------ //
+
+export async function fetchDocuments(limit = 100, offset = 0): Promise<DocumentListResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}${DOCUMENTS_ENDPOINT}?limit=${limit}&offset=${offset}`,
+  )
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch documents (status ${response.status})`)
+  }
+
+  return response.json()
+}
+
+export async function deleteDocument(id: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}${DOCUMENTS_ENDPOINT}/${id}`, {
+    method: "DELETE",
+  })
+
+  if (!response.ok && response.status !== 404) {
+    throw new Error(`Failed to delete document (status ${response.status})`)
+  }
+}
+
+export async function updateDocument(id: string, patch: DocumentUpdatePayload): Promise<DocumentRecord> {
+  const response = await fetch(`${API_BASE_URL}${DOCUMENTS_ENDPOINT}/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  })
+
+  if (!response.ok) {
+    throw new Error(`Failed to update document (status ${response.status})`)
+  }
+
+  return response.json()
 }
