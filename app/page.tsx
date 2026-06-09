@@ -3,6 +3,7 @@
 import type React from "react"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useRouter } from "next/navigation"
 import {
   AlertCircle,
   Download,
@@ -10,6 +11,7 @@ import {
   FileText,
   ImageIcon,
   Loader2,
+  LogOut,
   Pencil,
   ScanLine,
 } from "lucide-react"
@@ -22,6 +24,7 @@ import { PendingPreview } from "@/components/pending-preview"
 import { ConfirmRestoreDialog } from "@/components/confirm-restore-dialog"
 import { ProcessingView } from "@/components/processing-view"
 import { PdfPreviewView, type PdfPageRecord } from "@/components/pdf-preview-view"
+import { useAuth } from "@/components/auth-provider"
 import { fileToDataUrl, loadImage, downloadDataUrl } from "@/lib/image-utils"
 import { classifyImage, type ClassificationResult } from "@/lib/classification-api"
 import {
@@ -87,6 +90,15 @@ function upsertHistoryRecord(records: DocRecord[], record: DocRecord): DocRecord
 }
 
 export default function Page() {
+  const { user, loading: authLoading, signOut } = useAuth()
+  const router = useRouter()
+
+  useEffect(() => {
+    if (!authLoading && !user) {
+      router.replace("/login")
+    }
+  }, [authLoading, user, router])
+
   const [status, setStatus] = useState<Status>("idle")
   const [processingName, setProcessingName] = useState("")
   const [processingLabel, setProcessingLabel] = useState("Restoring document…")
@@ -156,8 +168,6 @@ export default function Page() {
         }))
         if (records.length > 0) {
           setHistory(records)
-          setActiveId(records[0].id)
-          setStatus("done")
         }
       })
       .catch((err) => {
@@ -678,6 +688,14 @@ export default function Page() {
 
   // ── Render ────────────────────────────────────────────────────────────
 
+  if (authLoading || !user) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-background">
+        <div className="size-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+      </div>
+    )
+  }
+
   return (
     <main className="min-h-screen bg-background">
       <header className="border-b border-border bg-card">
@@ -690,6 +708,23 @@ export default function Page() {
               <h1 className="text-sm font-semibold leading-tight text-foreground">Reclaim</h1>
               <p className="text-xs leading-tight text-muted-foreground">Document image restoration</p>
             </div>
+          </div>
+          <div className="flex items-center gap-3">
+            {user.user_metadata?.avatar_url ? (
+              <img
+                src={user.user_metadata.avatar_url}
+                alt={user.user_metadata?.full_name ?? user.email ?? "User"}
+                className="size-8 rounded-full object-cover"
+              />
+            ) : (
+              <div className="flex size-8 items-center justify-center rounded-full bg-secondary text-xs font-medium text-secondary-foreground">
+                {(user.user_metadata?.full_name ?? user.email ?? "U").charAt(0).toUpperCase()}
+              </div>
+            )}
+            <Button variant="ghost" size="sm" onClick={signOut} className="gap-1.5 text-muted-foreground">
+              <LogOut className="size-3.5" />
+              Sign out
+            </Button>
           </div>
         </div>
       </header>

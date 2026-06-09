@@ -1,9 +1,32 @@
 "use client"
 
+import { supabase } from "./supabase"
+
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000/api/v1"
 const RESTORATION_ENDPOINT = "/restorations"
 const PDF_RESTORATION_ENDPOINT = "/pdf-restorations"
 const DOCUMENTS_ENDPOINT = "/documents"
+
+// ------------------------------------------------------------------ //
+//  Auth-aware fetch wrapper                                           //
+// ------------------------------------------------------------------ //
+
+async function apiFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession()
+
+  const headers = new Headers(init.headers as HeadersInit | undefined)
+  if (session?.access_token) {
+    headers.set("Authorization", `Bearer ${session.access_token}`)
+  }
+
+  return fetch(url, { ...init, headers })
+}
+
+// ------------------------------------------------------------------ //
+//  Types                                                              //
+// ------------------------------------------------------------------ //
 
 export interface RestoredFile {
   page: number
@@ -108,11 +131,15 @@ export interface DocumentUpdatePayload {
   output_pdf_url?: string
 }
 
+// ------------------------------------------------------------------ //
+//  Restoration API                                                    //
+// ------------------------------------------------------------------ //
+
 export async function restoreImage(file: File): Promise<RestorationResponse> {
   const formData = new FormData()
   formData.append("file", file)
 
-  const response = await fetch(`${API_BASE_URL}${RESTORATION_ENDPOINT}`, {
+  const response = await apiFetch(`${API_BASE_URL}${RESTORATION_ENDPOINT}`, {
     method: "POST",
     body: formData,
   })
@@ -128,7 +155,7 @@ export async function restoreSoftImage(file: File): Promise<SoftRestorationRespo
   const formData = new FormData()
   formData.append("file", file)
 
-  const response = await fetch(`${API_BASE_URL}${RESTORATION_ENDPOINT}/soft`, {
+  const response = await apiFetch(`${API_BASE_URL}${RESTORATION_ENDPOINT}/soft`, {
     method: "POST",
     body: formData,
   })
@@ -145,7 +172,7 @@ export async function confirmThreshold(
   threshold: number,
   documentId?: string | null,
 ): Promise<ConfirmThresholdResponse> {
-  const response = await fetch(`${API_BASE_URL}${RESTORATION_ENDPOINT}/confirm-threshold`, {
+  const response = await apiFetch(`${API_BASE_URL}${RESTORATION_ENDPOINT}/confirm-threshold`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -166,7 +193,7 @@ export async function restorePdf(file: File): Promise<PdfRestorationResponse> {
   const formData = new FormData()
   formData.append("file", file)
 
-  const response = await fetch(`${API_BASE_URL}${PDF_RESTORATION_ENDPOINT}`, {
+  const response = await apiFetch(`${API_BASE_URL}${PDF_RESTORATION_ENDPOINT}`, {
     method: "POST",
     body: formData,
   })
@@ -194,11 +221,10 @@ export function resolveBackendAssetUrl(url: string): string {
 /**
  * Fetch the soft-restored image through the backend proxy and return a
  * local blob: URL.  This avoids CORS issues when drawing the image onto
- * a Canvas for real-time threshold preview (getImageData requires
- * same-origin or CORS-enabled images).
+ * a Canvas for real-time threshold preview.
  */
 export async function fetchSoftImageBlobUrl(contentHash: string): Promise<string> {
-  const response = await fetch(
+  const response = await apiFetch(
     `${API_BASE_URL}${RESTORATION_ENDPOINT}/soft-image/${encodeURIComponent(contentHash)}`,
   )
 
@@ -216,7 +242,7 @@ export async function fetchSoftImageBlobUrl(contentHash: string): Promise<string
  * for PDF page rebuilding with jsPDF.
  */
 export async function fetchCachedImageBlobUrl(contentHash: string): Promise<string> {
-  const response = await fetch(
+  const response = await apiFetch(
     `${API_BASE_URL}${RESTORATION_ENDPOINT}/cached-image/${encodeURIComponent(contentHash)}`,
   )
 
@@ -233,7 +259,7 @@ export async function fetchCachedImageBlobUrl(contentHash: string): Promise<stri
  * proxy and return a local blob: URL.
  */
 export async function fetchPdfPageBlobUrl(jobId: string, pageNum: number): Promise<string> {
-  const response = await fetch(
+  const response = await apiFetch(
     `${API_BASE_URL}${PDF_RESTORATION_ENDPOINT}/${encodeURIComponent(jobId)}/page-image/${pageNum}`,
   )
 
@@ -259,7 +285,7 @@ export interface PdfJobPageRecord {
  * Works even after server restarts (unlike the in-memory job status endpoint).
  */
 export async function fetchPdfJobPages(jobId: string): Promise<PdfJobPageRecord[]> {
-  const response = await fetch(
+  const response = await apiFetch(
     `${API_BASE_URL}${PDF_RESTORATION_ENDPOINT}/${encodeURIComponent(jobId)}/pages`,
   )
 
@@ -275,7 +301,7 @@ export async function fetchPdfJobPages(jobId: string): Promise<PdfJobPageRecord[
 // ------------------------------------------------------------------ //
 
 export async function fetchDocuments(limit = 100, offset = 0): Promise<DocumentListResponse> {
-  const response = await fetch(
+  const response = await apiFetch(
     `${API_BASE_URL}${DOCUMENTS_ENDPOINT}?limit=${limit}&offset=${offset}`,
   )
 
@@ -287,7 +313,7 @@ export async function fetchDocuments(limit = 100, offset = 0): Promise<DocumentL
 }
 
 export async function deleteDocument(id: string): Promise<void> {
-  const response = await fetch(`${API_BASE_URL}${DOCUMENTS_ENDPOINT}/${id}`, {
+  const response = await apiFetch(`${API_BASE_URL}${DOCUMENTS_ENDPOINT}/${id}`, {
     method: "DELETE",
   })
 
@@ -297,7 +323,7 @@ export async function deleteDocument(id: string): Promise<void> {
 }
 
 export async function updateDocument(id: string, patch: DocumentUpdatePayload): Promise<DocumentRecord> {
-  const response = await fetch(`${API_BASE_URL}${DOCUMENTS_ENDPOINT}/${id}`, {
+  const response = await apiFetch(`${API_BASE_URL}${DOCUMENTS_ENDPOINT}/${id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
