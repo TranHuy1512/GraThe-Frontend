@@ -189,6 +189,26 @@ export async function confirmThreshold(
   return response.json()
 }
 
+export class DuplicateJobError extends Error {
+  constructor(
+    message: string,
+    public readonly jobId: string,
+  ) {
+    super(message)
+    this.name = "DuplicateJobError"
+  }
+}
+
+export interface PdfProgressEvent {
+  status: PdfRestorationStatus
+  total_pages: number | null
+  processed_pages: number
+  progress_percent: number
+  output_pdf_url: string | null
+  document_id: string | null
+  error: string | null
+}
+
 export async function restorePdf(file: File): Promise<PdfRestorationResponse> {
   const formData = new FormData()
   formData.append("file", file)
@@ -198,17 +218,76 @@ export async function restorePdf(file: File): Promise<PdfRestorationResponse> {
     body: formData,
   })
 
+  if (response.status === 409) {
+    const body = await response.json()
+    const detail = body.detail as { message: string; job_id: string }
+    throw new DuplicateJobError(detail.message, detail.job_id)
+  }
+
   if (!response.ok) {
     throw new Error(`PDF restoration failed with status ${response.status}`)
   }
 
-  const result: PdfRestorationResponse = await response.json()
+  return response.json()
+}
 
-  if (result.status !== "completed" || !result.output_pdf_url) {
-    throw new Error(result.error || "PDF restoration did not return a downloadable PDF.")
+/**
+ * Subscribe to real-time progress events for a PDF restoration job.
+ * Resolves when the job reaches a terminal state (completed / failed).
+ * Pass an AbortSignal to cancel (e.g. on component unmount).
+ */
+export async function subscribePdfProgress(
+  jobId: string,
+  onEvent: (event: PdfProgressEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession()
+
+  const response = await fetch(
+    `${API_BASE_URL}${PDF_RESTORATION_ENDPOINT}/${encodeURIComponent(jobId)}/progress`,
+    {
+      headers: {
+        Authorization: session?.access_token ? `Bearer ${session.access_token}` : "",
+        Accept: "text/event-stream",
+        "Cache-Control": "no-cache",
+      },
+      signal,
+    },
+  )
+
+  if (!response.ok) {
+    throw new Error(`SSE connection failed with status ${response.status}`)
   }
 
-  return result
+  const reader = response.body!.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      const lines = buffer.split("\n")
+      buffer = lines.pop() ?? ""
+
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          try {
+            const data = JSON.parse(line.slice(6)) as PdfProgressEvent
+            onEvent(data)
+          } catch {
+            // ignore malformed events
+          }
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
 }
 
 export function resolveBackendAssetUrl(url: string): string {

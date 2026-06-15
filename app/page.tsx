@@ -36,8 +36,11 @@ import {
   resolveBackendAssetUrl,
   restoreImage,
   restorePdf,
+  subscribePdfProgress,
   updateDocument,
+  DuplicateJobError,
   type DocumentRecord,
+  type PdfProgressEvent,
 } from "@/lib/restoration-api"
 import { buildPdfFromPages, dataUrlToFile, renderSinglePdfPage } from "@/lib/pdf-utils"
 
@@ -131,6 +134,10 @@ export default function Page() {
   const [preparingPdfPageEdit, setPreparingPdfPageEdit] = useState(false)
 
   const newInputRef = useRef<HTMLInputElement>(null)
+  const pdfSseController = useRef<AbortController | null>(null)
+
+  // Abort any in-flight SSE stream on unmount
+  useEffect(() => () => { pdfSseController.current?.abort() }, [])
 
   // Reset PDF-specific UI state when the active history item changes
   useEffect(() => {
@@ -224,35 +231,88 @@ export default function Page() {
     setRestorationError(null)
 
     if (pendingFile.type === "application/pdf") {
-      setProcessingLabel("Restoring PDF…")
+      setProcessingLabel("Uploading PDF…")
+      pdfSseController.current?.abort()
+      const controller = new AbortController()
+      pdfSseController.current = controller
+
+      const runJob = async (jobId: string, filename: string, createdAt: string) => {
+        // Add a placeholder record immediately so the sidebar shows it
+        setHistory((prev) =>
+          upsertHistoryRecord(prev, {
+            id: jobId,
+            mode: "pdf",
+            fileName: filename,
+            thumbUrl: "",
+            pageCount: 0,
+            createdAt: new Date(createdAt).getTime(),
+            imageDoc: null,
+            outputPdfUrl: null,
+            originalFile: null,
+            softImageUrl: null,
+            softContentHash: null,
+            originalPdfFile: pendingFile,
+            pdfRestoredPages: [],
+            pdfPages: null,
+          }),
+        )
+        setActiveId(jobId)
+
+        await subscribePdfProgress(
+          jobId,
+          (event: PdfProgressEvent) => {
+            const { status: s, processed_pages, total_pages, output_pdf_url } = event
+            if (s === "extracting") {
+              setProcessingLabel("Extracting pages…")
+            } else if (s === "processing") {
+              setProcessingLabel(
+                total_pages
+                  ? `Processing page ${processed_pages} of ${total_pages}…`
+                  : `Processing page ${processed_pages}…`,
+              )
+            } else if (s === "merging") {
+              setProcessingLabel("Merging pages…")
+            } else if (s === "uploading") {
+              setProcessingLabel("Uploading PDF…")
+            } else if (s === "completed" && output_pdf_url) {
+              setHistory((prev) =>
+                prev.map((rec) =>
+                  rec.id !== jobId
+                    ? rec
+                    : { ...rec, outputPdfUrl: output_pdf_url, pageCount: total_pages ?? processed_pages },
+                ),
+              )
+            }
+          },
+          controller.signal,
+        )
+      }
+
       try {
-        const result = await restorePdf(pendingFile)
-        const record: DocRecord = {
-          id: result.job_id,
-          mode: "pdf",
-          fileName: result.input_filename,
-          thumbUrl: "",
-          pageCount: result.total_pages ?? result.processed_pages,
-          createdAt: new Date(result.created_at).getTime(),
-          imageDoc: null,
-          outputPdfUrl: result.output_pdf_url,
-          originalFile: null,
-          softImageUrl: null,
-          softContentHash: null,
-          originalPdfFile: pendingFile,
-          pdfRestoredPages: result.pages
-            .filter((p) => p.public_url)
-            .map((p) => ({ pageNumber: p.page, url: p.public_url! })),
-          pdfPages: null,
-        }
-        setHistory((prev) => upsertHistoryRecord(prev, record))
-        setActiveId(result.job_id)
+        const initial = await restorePdf(pendingFile)
+        await runJob(initial.job_id, initial.input_filename, initial.created_at)
         setStatus("done")
         setPendingFile(null)
       } catch (err) {
-        console.log("[v0] PDF processing failed:", err)
-        setRestorationError(err instanceof Error ? err.message : "PDF restoration failed.")
-        setStatus("pending")
+        if (controller.signal.aborted) return
+        if (err instanceof DuplicateJobError) {
+          setProcessingLabel("Already processing — connecting to existing job…")
+          try {
+            await runJob(err.jobId, pendingFile.name, new Date().toISOString())
+            setStatus("done")
+            setPendingFile(null)
+          } catch (sseErr) {
+            if (controller.signal.aborted) return
+            setRestorationError("This document is already being processed in another tab.")
+            setStatus("pending")
+          }
+        } else {
+          console.log("[v0] PDF processing failed:", err)
+          setRestorationError(err instanceof Error ? err.message : "PDF restoration failed.")
+          setStatus("pending")
+        }
+      } finally {
+        pdfSseController.current = null
       }
       return
     }
